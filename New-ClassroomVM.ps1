@@ -11,7 +11,8 @@
       3. Creates the Azure resource group
       4. Provisions the VM from the official Microsoft SQL Server 2025 Developer image
       5. Adds a second administrator account (student) via VM Run Command
-      6. Outputs connection details when complete
+      6. Installs SQL Server Management Studio 22 (SSMS 22) via VM Run Command
+      7. Outputs connection details when complete
 
     Image URN  : MicrosoftSQLServer:sql2025-ws2025:sqldev-gen2:latest
     VM Size    : Standard_D2s_v5 (2 vCPUs, 8 GiB RAM)
@@ -19,7 +20,7 @@
 
 .NOTES
     Author     : Software Tutorial Services LLC
-    Version    : 1.0
+    Version    : 1.1
     Run from   : Azure Cloud Shell (PowerShell)
     Pre-req    : Must be logged into Azure Cloud Shell — no additional setup required
 
@@ -255,9 +256,10 @@ Write-Host "  │  DNS label       : $($domainLabel.PadRight(42))│" -Foregroun
 Write-Host "  │  Image           : $($IMAGE_URN.PadRight(42))│" -ForegroundColor Cyan
 Write-Host "  │                                                                │" -ForegroundColor Cyan
 Write-Host "  │  Admin accounts  : adminz  /  student (both Administrators)    │" -ForegroundColor Cyan
+Write-Host "  │  SSMS 22         : Will be installed automatically              │" -ForegroundColor Cyan
 Write-Host "  │                                                                │" -ForegroundColor Cyan
 Write-Host "  │  NOTE: A new resource group will be created.                   │" -ForegroundColor Cyan
-Write-Host "  │  Estimated provisioning time: 5–10 minutes.                    │" -ForegroundColor Cyan
+Write-Host "  │  Estimated provisioning time: 10–20 minutes (includes SSMS).   │" -ForegroundColor Cyan
 Write-Host "  └──────────────────────────────────────────────────────────────┘" -ForegroundColor Cyan
 Write-Host ""
 
@@ -323,7 +325,7 @@ try {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 7 — ADD 'student' ADMINISTRATOR ACCOUNT VIA RUN COMMAND
+# STEP 7 — ADD 'student' ADMINISTRATOR ACCOUNT AND CREATE C:\CLASSFILES FOLDER
 # ─────────────────────────────────────────────────────────────────────────────
 
 Write-Step "Adding 'student' administrator account to VM..."
@@ -333,6 +335,7 @@ $addStudentScript = @"
 `$password = ConvertTo-SecureString '$studentPassword' -AsPlainText -Force
 New-LocalUser -Name 'student' -Password `$password -FullName 'Student' -Description 'Classroom student account' -PasswordNeverExpires -ErrorAction Stop
 Add-LocalGroupMember -Group 'Administrators' -Member 'student' -ErrorAction Stop
+New-Item -Path 'C:\Classfiles' -ItemType Directory -Force | Out-Null
 Write-Output 'student account created and added to Administrators.'
 "@
 
@@ -346,7 +349,7 @@ try {
 
     $output = $runResult.Value[0].Message
     if ($output -like "*created and added*") {
-        Write-OK "student account created and added to Administrators."
+        Write-OK "student account created, added to Administrators, and C:\Classfiles created."
     } else {
         Write-Host "  [WARN] Run Command completed but output was unexpected:" -ForegroundColor DarkYellow
         Write-Info $output
@@ -358,6 +361,109 @@ try {
     Write-Info "  `$pw = ConvertTo-SecureString 'Pa`$`$w0rd' -AsPlainText -Force"
     Write-Info "  New-LocalUser -Name 'student' -Password `$pw -PasswordNeverExpires"
     Write-Info "  Add-LocalGroupMember -Group 'Administrators' -Member 'student'"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 7b — INSTALL SSMS 22
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# This block embeds Install-SSMS22.ps1 as an inline script string and runs it
+# on the VM via Invoke-AzVMRunCommand. A single-quoted here-string (@' '@) is
+# used so that PowerShell variables inside the script are NOT expanded by Cloud
+# Shell — they are passed verbatim and evaluated on the VM as intended.
+#
+# NOTE: SSMS 22 is a large installer (~700 MB download + VS engine background
+# processes). The Run Command has a 90-minute execution timeout in Azure.
+# The wait loop below watches for the VS installer engine to finish before
+# proceeding. Expect this step to take 10–15 minutes on a fresh VM.
+# ─────────────────────────────────────────────────────────────────────────────
+
+Write-Step "Installing SSMS 22 on VM (this may take 10-15 minutes)..."
+Write-Info "Downloading bootstrapper from Microsoft and running silent install..."
+Write-Info "Please wait — do not close Cloud Shell..."
+
+$installSsmsScript = @'
+# Requires -RunAsAdministrator
+
+$WorkingDir  = "C:\Temp"
+$installDir  = "C:\Classfiles"
+$destination = "$installDir\vs_SSMS.exe"
+$logFile     = "$installDir\SSMS22_Install.log"
+$source      = "https://aka.ms/ssms/22/release/vs_SSMS.exe"
+
+# Ensure destination directory exists
+if (-not (Test-Path $installDir)) {
+    New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+}
+
+# Ensure working directory exists before changing to it
+if (-not (Test-Path $WorkingDir)) {
+    New-Item -ItemType Directory -Path $WorkingDir -Force | Out-Null
+}
+Set-Location -Path $WorkingDir
+
+# Enforce TLS 1.2 for the download (required on Windows Server 2025)
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+Write-Host "Downloading SSMS 22 bootstrapper..."
+Invoke-WebRequest -Uri $source -OutFile $destination -UseBasicParsing
+
+Write-Host "Starting SSMS 22 silent installation..."
+$installArgs = "--passive --includeRecommended --norestart --wait"
+
+$process = Start-Process `
+    -FilePath    $destination `
+    -ArgumentList $installArgs `
+    -Wait `
+    -PassThru
+
+# SAFETY CHECK: Wait for the underlying VS Installer engine to finish.
+# The bootstrapper often spawns 'vs_setup.exe' or 'setup.exe' as child processes.
+Write-Host "Waiting for background installer processes to clear..."
+$installerProcesses = @("vs_setup", "setup", "vs_installer")
+
+do {
+    $running = Get-Process -Name $installerProcesses -ErrorAction SilentlyContinue
+    if ($running) {
+        Start-Sleep -Seconds 5
+    }
+} while ($running)
+
+Write-Host "Installation complete."
+
+# Disable certificate revocation checks
+reg add "HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\WinTrust\Trust Providers\Software Publishing" /v State /t REG_DWORD /d 0x23c00 /f
+
+# Run ngen to optimize SSMS 22 binaries (speeds up first launch)
+$ngenPath = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\ngen.exe"
+$ssmsPath = "C:\Program Files\Microsoft SQL Server Management Studio 22\Release\Common7\IDE\Ssms.exe"
+
+Start-Process -FilePath $ngenPath -ArgumentList "install `"$ssmsPath`"" -Wait
+
+Write-Output "SSMS 22 installation and optimization complete."
+'@
+
+try {
+    $ssmsResult = Invoke-AzVMRunCommand `
+        -ResourceGroupName $resourceGroupName `
+        -VMName            $vmName `
+        -CommandId         "RunPowerShellScript" `
+        -ScriptString      $installSsmsScript `
+        -ErrorAction Stop
+
+    $ssmsOutput = $ssmsResult.Value[0].Message
+    if ($ssmsOutput -like "*complete*") {
+        Write-OK "SSMS 22 installed and optimized successfully."
+    } else {
+        Write-Host "  [WARN] SSMS install Run Command completed but output was unexpected:" -ForegroundColor DarkYellow
+        Write-Info $ssmsOutput
+    }
+} catch {
+    Write-Host "  [WARN] SSMS 22 installation did not complete automatically: $_" -ForegroundColor DarkYellow
+    Write-Host ""
+    Write-Info "You can install SSMS 22 manually after connecting to the VM:"
+    Write-Info "  1. RDP into the VM as adminz"
+    Write-Info "  2. Run Install-SSMS22.ps1 from an elevated PowerShell prompt"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -392,6 +498,7 @@ Write-Host "  │    Username: adminz   Password: (as configured)               
 Write-Host "  │    Username: student  Password: (as configured)                │" -ForegroundColor Green
 Write-Host "  │                                                                │" -ForegroundColor Green
 Write-Host "  │  SQL Server 2025 Developer is pre-installed and ready.         │" -ForegroundColor Green
+Write-Host "  │  SSMS 22 has been installed and optimized.                     │" -ForegroundColor Green
 Write-Host "  └──────────────────────────────────────────────────────────────┘" -ForegroundColor Green
 Write-Host ""
 Write-Info "Share the Public IP and student credentials with your class."
