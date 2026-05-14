@@ -1,6 +1,6 @@
                                                      INSTRUCTOR GUIDE
 
-Querying and Analyzing SQL Server 2025
+Querying and Analyzing SQL Server 2025 
 
 Module 1: Querying Data with SQL Server Management Studio 22
 
