@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Courseware Studio — Classroom VM Provisioning Script
+    Courseware Studio — Classroom VM Provisioning Script  
     Provisions an Azure VM from the SQL Server 2025 Developer on Windows Server 2025
     Marketplace image for instructor-led training environments.
 
